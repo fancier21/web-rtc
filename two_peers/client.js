@@ -16,7 +16,14 @@ let isConnected = false;
 async function startCall() {
   try {
     // Request access to media devices
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+            width: { max: 320 },
+            height: { max: 240 },
+            frameRate: { max: 30 },
+        },
+        audio: true,
+    });
 
     // Get the video track from the stream
     videoTrack = localStream.getVideoTracks()[0];
@@ -25,7 +32,7 @@ async function startCall() {
     localVideo.srcObject = localStream;
 
     // Create an instance of RTCPeerConnection
-    const peerConnection = new RTCPeerConnection({ iceServers: coturnServer });
+    const peerConnection = new RTCPeerConnection();
 
     // Add the video track to the peer connection
     peerConnection.addTrack(videoTrack, localStream);
@@ -113,45 +120,15 @@ async function startCall() {
 
     // Function to handle the answer message
     async function handleAnswer(answer) {
-      if (peerConnection.signalingState === 'have-local-offer' || peerConnection.signalingState === 'have-remote-offer') {
-        const remoteDesc = new RTCSessionDescription(answer);
-        // Set the remote description
-        await peerConnection.setRemoteDescription(remoteDesc);
-      } else {
-        console.error('Invalid signaling state to set remote answer:', peerConnection.signalingState);
-      }
+      // Set the remote description
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
     }
 
     // Function to handle the candidate message
     function handleCandidate(candidate) {
-      try {
-        if (candidate && candidate.candidate) {
-          console.log(
-            'candidate:', typeof candidate.candidate.candidate,
-            'sdpMid:', typeof candidate.candidate.sdpMid,
-            'sdpMLineIndex:', typeof candidate.candidate.sdpMLineIndex
-          )
-
-          const iceCandidate = new RTCIceCandidate({
-            candidate: candidate.candidate.candidate,
-            sdpMid: candidate.candidate.sdpMid,
-            sdpMLineIndex: candidate.candidate.sdpMLineIndex
-          });
-
-          // Add the ICE candidate to the peer connection
-          peerConnection.addIceCandidate(iceCandidate)
-            .then(() => {
-              console.log('ICE candidate successfully added');
-            })
-            .catch((error) => {
-              console.error('Error adding ICE candidate:', error);
-            });
-        } else {
-          console.warn('Invalid ICE candidate:', candidate);
-        }
-      } catch (error) {
-        console.error('Error creating RTCIceCandidate:', error);
-      }
+      // Add the ICE candidate to the peer connection
+      const iceCandidate = candidate.candidate
+      peerConnection.addIceCandidate(iceCandidate)
     }
   } catch (error) {
     console.error('Error accessing media devices:', error);
