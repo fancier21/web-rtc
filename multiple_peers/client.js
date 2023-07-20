@@ -1,11 +1,17 @@
-var constraints = {
+const constraints = {
     video: {
-        width: { max: 320 },
-        height: { max: 240 },
-        frameRate: { max: 30 },
+        width: { ideal: 320 },
+        height: { ideal: 240 },
+        frameRate: { ideal: 30 },
     },
     audio: false,
 };
+
+let localUuid;
+let localDisplayName;
+let localStream;
+let serverConnection;
+const peerConnections = {};
 
 function generateClientId() {
     return Math.random().toString(36).substring(2, 9);
@@ -13,9 +19,8 @@ function generateClientId() {
 
 function errorHandler(error) {
     console.error(error);
+    // Add your error handling logic here (e.g., display an error message on the UI).
 }
-
-const peerConnections = {};
 
 function start() {
     localUuid = generateClientId();
@@ -25,18 +30,15 @@ function start() {
         .getElementById("localVideoContainer")
         .appendChild(makeLabel(localDisplayName));
 
-    // set up local video stream
+    // Set up local video stream
     if (navigator.mediaDevices.getUserMedia) {
         navigator.mediaDevices
             .getUserMedia(constraints)
             .then((stream) => {
                 localStream = stream;
                 document.getElementById("localVideo").srcObject = stream;
-            })
-            .catch(errorHandler)
 
-            // set up websocket and message all existing clients
-            .then(() => {
+                // Set up websocket and message all existing clients
                 serverConnection = new WebSocket("ws://localhost:8080");
                 serverConnection.onmessage = gotMessageFromServer;
                 serverConnection.onopen = (event) => {
@@ -49,26 +51,29 @@ function start() {
                     );
                 };
             })
-            .catch(errorHandler);
+            .catch((error) => {
+                // Handle getUserMedia permission issues gracefully
+                errorHandler("Error accessing media devices: " + error.message);
+            });
     } else {
         alert("Your browser does not support getUserMedia API");
     }
 }
 
 function gotMessageFromServer(message) {
-    var signal = JSON.parse(message.data);
-    var peerUuid = signal.uuid;
+    const signal = JSON.parse(message.data);
+    const peerUuid = signal.uuid;
 
     // Ignore messages that are not for us or from ourselves
     if (
-        peerUuid == localUuid ||
-        (signal.dest != localUuid && signal.dest != "all")
+        peerUuid === localUuid ||
+        (signal.dest !== localUuid && signal.dest !== "all")
     )
         return;
 
-    if (signal.displayName && signal.dest == "all") {
+    if (signal.displayName && signal.dest === "all") {
         console.log("1");
-        // set up peer connection object for a newcomer peer
+        // Set up peer connection object for a newcomer peer
         setUpPeer(peerUuid, signal.displayName);
         serverConnection.send(
             JSON.stringify({
@@ -77,9 +82,9 @@ function gotMessageFromServer(message) {
                 dest: peerUuid,
             })
         );
-    } else if (signal.displayName && signal.dest == localUuid) {
+    } else if (signal.displayName && signal.dest === localUuid) {
         console.log("2");
-        // initiate call if we are the newcomer peer
+        // Initiate call if we are the newcomer peer
         setUpPeer(peerUuid, signal.displayName, true);
     } else if (signal.sdp) {
         console.log("3");
@@ -87,7 +92,7 @@ function gotMessageFromServer(message) {
             .setRemoteDescription(new RTCSessionDescription(signal.sdp))
             .then(function () {
                 // Only create answers in response to offers
-                if (signal.sdp.type == "offer") {
+                if (signal.sdp.type === "offer") {
                     peerConnections[peerUuid].pc
                         .createAnswer()
                         .then((description) =>
@@ -157,13 +162,13 @@ function gotIceCandidate(event, peerUuid) {
 
 function gotRemoteStream(event, peerUuid) {
     console.log(`got remote stream, peer ${peerUuid}`);
-    // assign stream to new HTML video element
-    var vidElement = document.createElement("video");
+    // Assign stream to a new HTML video element
+    const vidElement = document.createElement("video");
     vidElement.setAttribute("autoplay", "");
     vidElement.setAttribute("muted", "");
     vidElement.srcObject = event.streams[0];
 
-    var vidContainer = document.createElement("div");
+    const vidContainer = document.createElement("div");
     vidContainer.setAttribute("id", "remoteVideo_" + peerUuid);
     vidContainer.setAttribute("class", "videoContainer");
     vidContainer.appendChild(vidElement);
@@ -175,7 +180,7 @@ function gotRemoteStream(event, peerUuid) {
 }
 
 function checkPeerDisconnect(event, peerUuid) {
-    var state = peerConnections[peerUuid].pc.iceConnectionState;
+    const state = peerConnections[peerUuid].pc.iceConnectionState;
     console.log(`connection with peer ${peerUuid} ${state}`);
     if (state === "failed" || state === "closed" || state === "disconnected") {
         delete peerConnections[peerUuid];
@@ -187,11 +192,11 @@ function checkPeerDisconnect(event, peerUuid) {
 }
 
 function updateLayout() {
-    // update CSS grid based on number of displayed videos
-    var rowHeight = "98vh";
-    var colWidth = "98vw";
+    // Update CSS grid based on the number of displayed videos
+    let rowHeight = "98vh";
+    let colWidth = "98vw";
 
-    var numVideos = Object.keys(peerConnections).length + 1; // add one to include local video
+    let numVideos = Object.keys(peerConnections).length + 1; // Add one to include the local video
 
     if (numVideos > 1 && numVideos <= 4) {
         // 2x2 grid
@@ -208,8 +213,16 @@ function updateLayout() {
 }
 
 function makeLabel(label) {
-    var vidLabel = document.createElement("div");
+    const vidLabel = document.createElement("div");
     vidLabel.appendChild(document.createTextNode(label));
     vidLabel.setAttribute("class", "videoLabel");
     return vidLabel;
 }
+
+// Clean up peer connections when the user leaves the page
+window.addEventListener("beforeunload", function () {
+    for (const peerUuid in peerConnections) {
+        peerConnections[peerUuid].pc.close();
+    }
+    serverConnection.close();
+});
