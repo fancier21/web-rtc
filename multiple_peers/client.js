@@ -1,59 +1,47 @@
+// Configuration for media constraints (video and audio)
 const constraints = {
     video: {
-        width: { ideal: 320 },
-        height: { ideal: 240 },
+        width: { ideal: 240 },
+        height: { ideal: 200 },
         frameRate: { ideal: 30 },
     },
     audio: false,
 };
 
+// Variables for storing local data and connection information
 let localUuid;
 let localDisplayName;
 let localStream;
 let serverConnection;
 const peerConnections = {};
 
+// Function to generate a random client ID (used for UUID)
 function generateClientId() {
     return Math.random().toString(36).substring(2, 9);
 }
 
+// Error handling function to log errors (custom error handling can be added)
 function errorHandler(error) {
     console.error(error);
-    // Add your error handling logic here (e.g., display an error message on the UI).
 }
 
-async function start() {
-    localUuid = generateClientId();
-
-    localDisplayName = prompt("Enter your name", "");
-    document
-        .getElementById("localVideoContainer")
-        .appendChild(makeLabel(localDisplayName));
-
-    // Set up local video stream
+// Get user media stream (video and audio) from the user's device
+async function getUserMediaStream(constraints) {
     try {
-        localStream = await navigator.mediaDevices.getUserMedia(constraints);
-        document.getElementById("localVideo").srcObject = localStream;
-
-        // Set up websocket and message all existing clients
-        serverConnection = new WebSocket("ws://localhost:8080");
-        serverConnection.onmessage = gotMessageFromServer;
-        serverConnection.onopen = async (event) => {
-            await serverConnection.send(
-                JSON.stringify({
-                    displayName: localDisplayName,
-                    uuid: localUuid,
-                    dest: "all",
-                })
-            );
-        };
+        return await navigator.mediaDevices.getUserMedia(constraints);
     } catch (error) {
-        // Handle getUserMedia permission issues gracefully
         errorHandler("Error accessing media devices: " + error.message);
+        throw error;
     }
 }
 
-async function gotMessageFromServer(message) {
+// Send message to the server
+function sendMessageToServer(message) {
+    serverConnection.send(JSON.stringify(message));
+}
+
+// Handle incoming messages from the server
+async function handleServerMessage(message) {
     const signal = JSON.parse(message.data);
     const peerUuid = signal.uuid;
 
@@ -66,28 +54,29 @@ async function gotMessageFromServer(message) {
 
     if (signal.displayName && signal.dest === "all") {
         // Set up peer connection object for a newcomer peer
-        setUpPeer(peerUuid, signal.displayName);
-        await serverConnection.send(
-            JSON.stringify({
-                displayName: localDisplayName,
-                uuid: localUuid,
-                dest: peerUuid,
-            })
-        );
+        await setUpPeer(peerUuid, signal.displayName);
+        sendMessageToServer({
+            displayName: localDisplayName,
+            uuid: localUuid,
+            dest: peerUuid,
+        });
     } else if (signal.displayName && signal.dest === localUuid) {
         // Initiate call if we are the newcomer peer
-        setUpPeer(peerUuid, signal.displayName, true);
+        await setUpPeer(peerUuid, signal.displayName, true);
     } else if (signal.sdp) {
         try {
+            // Set the remote description for the peer connection
             await peerConnections[peerUuid].pc.setRemoteDescription(
                 new RTCSessionDescription(signal.sdp)
             );
 
             // Only create answers in response to offers
             if (signal.sdp.type === "offer") {
+                // Create an answer description for the remote peer
                 const description = await peerConnections[
                     peerUuid
                 ].pc.createAnswer();
+                // Send the answer to the remote peer
                 await createdDescription(description, peerUuid);
             }
         } catch (error) {
@@ -95,6 +84,7 @@ async function gotMessageFromServer(message) {
         }
     } else if (signal.ice) {
         try {
+            // Add the ICE candidate received from the remote peer
             await peerConnections[peerUuid].pc.addIceCandidate(
                 new RTCIceCandidate(signal.ice)
             );
@@ -104,7 +94,8 @@ async function gotMessageFromServer(message) {
     }
 }
 
-function setUpPeer(peerUuid, displayName, initCall = false) {
+// Set up a new peer connection and add event listeners
+async function setUpPeer(peerUuid, displayName, initCall = false) {
     peerConnections[peerUuid] = {
         displayName: displayName,
         pc: new RTCPeerConnection(),
@@ -115,98 +106,89 @@ function setUpPeer(peerUuid, displayName, initCall = false) {
         gotRemoteStream(event, peerUuid);
     peerConnections[peerUuid].pc.oniceconnectionstatechange = (event) =>
         checkPeerDisconnect(event, peerUuid);
-    peerConnections[peerUuid].pc.addStream(localStream);
+
+    // Add the local media stream to the peer connection
+    if (localStream) {
+        localStream.getTracks().forEach((track) => {
+            peerConnections[peerUuid].pc.addTrack(track, localStream);
+        });
+    }
 
     if (initCall) {
-        peerConnections[peerUuid].pc
-            .createOffer()
-            .then((description) => createdDescription(description, peerUuid))
-            .catch(errorHandler);
+        // If this is a new peer, create an offer description and send it to the remote peer
+        try {
+            const description = await peerConnections[
+                peerUuid
+            ].pc.createOffer();
+            await createdDescription(description, peerUuid);
+        } catch (error) {
+            errorHandler(error);
+        }
     }
 }
 
+// Handle the created description (SDP) for a peer connection
 async function createdDescription(description, peerUuid) {
     console.log(`Created ${description.type} description, peer ${peerUuid}`);
     try {
         await peerConnections[peerUuid].pc.setLocalDescription(description);
-        await serverConnection.send(
-            JSON.stringify({
-                sdp: peerConnections[peerUuid].pc.localDescription,
-                uuid: localUuid,
-                dest: peerUuid,
-            })
-        );
+        sendMessageToServer({
+            sdp: peerConnections[peerUuid].pc.localDescription,
+            uuid: localUuid,
+            dest: peerUuid,
+        });
     } catch (error) {
         errorHandler(error);
     }
 }
 
+// Handle ICE candidates and send them to the remote peer
 function gotIceCandidate(event, peerUuid) {
     if (event.candidate != null) {
         console.log(`Local ICE candidate: \n${event.candidate.candidate}`);
 
-        serverConnection.send(
-            JSON.stringify({
-                ice: event.candidate,
-                uuid: localUuid,
-                dest: peerUuid,
-            })
-        );
+        sendMessageToServer({
+            ice: event.candidate,
+            uuid: localUuid,
+            dest: peerUuid,
+        });
     }
 }
 
+// Handle incoming remote stream and display it in the UI
 function gotRemoteStream(event, peerUuid) {
-    console.log(`got remote stream, peer ${peerUuid}`);
+    console.log(`Got remote stream, peer ${peerUuid}`);
     // Assign stream to a new HTML video element
     const vidElement = document.createElement("video");
     vidElement.setAttribute("autoplay", "");
     vidElement.setAttribute("muted", "");
     vidElement.srcObject = event.streams[0];
 
+    // Create a container for the video and display name
     const vidContainer = document.createElement("div");
     vidContainer.setAttribute("id", "remoteVideo_" + peerUuid);
     vidContainer.setAttribute("class", "videoContainer");
     vidContainer.appendChild(vidElement);
     vidContainer.appendChild(makeLabel(peerConnections[peerUuid].displayName));
 
+    // Add the video container to the "videos" container in the UI
     document.getElementById("videos").appendChild(vidContainer);
-
-    updateLayout();
 }
 
+// Function to check the connection state of a peer and clean up if disconnected
 function checkPeerDisconnect(event, peerUuid) {
     const state = peerConnections[peerUuid].pc.iceConnectionState;
     console.log(`connection with peer ${peerUuid} ${state}`);
     if (state === "failed" || state === "closed" || state === "disconnected") {
+        // Close the peer connection and remove the video container from the UI
         delete peerConnections[peerUuid];
         document
             .getElementById("videos")
             .removeChild(document.getElementById("remoteVideo_" + peerUuid));
-        updateLayout();
     }
 }
 
-function updateLayout() {
-    // Update CSS grid based on the number of displayed videos
-    let rowHeight = "98vh";
-    let colWidth = "98vw";
-
-    let numVideos = Object.keys(peerConnections).length + 1; // Add one to include the local video
-
-    if (numVideos > 1 && numVideos <= 4) {
-        // 2x2 grid
-        rowHeight = "48vh";
-        colWidth = "48vw";
-    } else if (numVideos > 4) {
-        // 3x3 grid
-        rowHeight = "32vh";
-        colWidth = "32vw";
-    }
-
-    document.documentElement.style.setProperty(`--rowHeight`, rowHeight);
-    document.documentElement.style.setProperty(`--colWidth`, colWidth);
-}
-
+// Function to create and return a label element with the provided text
 function makeLabel(label) {
     const vidLabel = document.createElement("div");
     vidLabel.appendChild(document.createTextNode(label));
@@ -215,238 +197,42 @@ function makeLabel(label) {
 }
 
 // Clean up peer connections when the user leaves the page
-window.addEventListener("beforeunload", async function () {
+window.addEventListener("beforeunload", function () {
     for (const peerUuid in peerConnections) {
         peerConnections[peerUuid].pc.close();
     }
     serverConnection.close();
 });
 
-// const constraints = {
-//     video: {
-//         width: { ideal: 320 },
-//         height: { ideal: 240 },
-//         frameRate: { ideal: 30 },
-//     },
-//     audio: false,
-// };
+// Start the video chat when the page is loaded
+window.addEventListener("load", async function () {
+    localUuid = generateClientId();
+    localDisplayName = prompt("Enter your name", "");
 
-// let localUuid;
-// let localDisplayName;
-// let localStream;
-// let serverConnection;
-// const peerConnections = {};
+    // Add the local display name to the user interface
+    document
+        .getElementById("localVideoContainer")
+        .appendChild(makeLabel(localDisplayName));
 
-// function generateClientId() {
-//     return Math.random().toString(36).substring(2, 9);
-// }
+    try {
+        localStream = await getUserMediaStream(constraints);
 
-// function errorHandler(error) {
-//     console.error(error);
-//     // Add your error handling logic here (e.g., display an error message on the UI).
-// }
+        // Set the local media stream as the source for the local video element
+        document.getElementById("localVideo").srcObject = localStream;
 
-// function start() {
-//     localUuid = generateClientId();
-
-//     localDisplayName = prompt("Enter your name", "");
-//     document
-//         .getElementById("localVideoContainer")
-//         .appendChild(makeLabel(localDisplayName));
-
-//     // Set up local video stream
-//     if (navigator.mediaDevices.getUserMedia) {
-//         navigator.mediaDevices
-//             .getUserMedia(constraints)
-//             .then((stream) => {
-//                 localStream = stream;
-//                 document.getElementById("localVideo").srcObject = stream;
-
-//                 // Set up websocket and message all existing clients
-//                 serverConnection = new WebSocket("ws://localhost:8080");
-//                 serverConnection.onmessage = gotMessageFromServer;
-//                 serverConnection.onopen = (event) => {
-//                     serverConnection.send(
-//                         JSON.stringify({
-//                             displayName: localDisplayName,
-//                             uuid: localUuid,
-//                             dest: "all",
-//                         })
-//                     );
-//                 };
-//             })
-//             .catch((error) => {
-//                 // Handle getUserMedia permission issues gracefully
-//                 errorHandler("Error accessing media devices: " + error.message);
-//             });
-//     } else {
-//         alert("Your browser does not support getUserMedia API");
-//     }
-// }
-
-// function gotMessageFromServer(message) {
-//     const signal = JSON.parse(message.data);
-//     const peerUuid = signal.uuid;
-
-//     // Ignore messages that are not for us or from ourselves
-//     if (
-//         peerUuid === localUuid ||
-//         (signal.dest !== localUuid && signal.dest !== "all")
-//     )
-//         return;
-
-//     if (signal.displayName && signal.dest === "all") {
-//         console.log("1");
-//         // Set up peer connection object for a newcomer peer
-//         setUpPeer(peerUuid, signal.displayName);
-//         serverConnection.send(
-//             JSON.stringify({
-//                 displayName: localDisplayName,
-//                 uuid: localUuid,
-//                 dest: peerUuid,
-//             })
-//         );
-//     } else if (signal.displayName && signal.dest === localUuid) {
-//         console.log("2");
-//         // Initiate call if we are the newcomer peer
-//         setUpPeer(peerUuid, signal.displayName, true);
-//     } else if (signal.sdp) {
-//         console.log("3");
-//         peerConnections[peerUuid].pc
-//             .setRemoteDescription(new RTCSessionDescription(signal.sdp))
-//             .then(function () {
-//                 // Only create answers in response to offers
-//                 if (signal.sdp.type === "offer") {
-//                     peerConnections[peerUuid].pc
-//                         .createAnswer()
-//                         .then((description) =>
-//                             createdDescription(description, peerUuid)
-//                         )
-//                         .catch(errorHandler);
-//                 }
-//             })
-//             .catch(errorHandler);
-//     } else if (signal.ice) {
-//         peerConnections[peerUuid].pc
-//             .addIceCandidate(new RTCIceCandidate(signal.ice))
-//             .catch(errorHandler);
-//     }
-// }
-
-// function setUpPeer(peerUuid, displayName, initCall = false) {
-//     peerConnections[peerUuid] = {
-//         displayName: displayName,
-//         pc: new RTCPeerConnection(),
-//     };
-//     peerConnections[peerUuid].pc.onicecandidate = (event) =>
-//         gotIceCandidate(event, peerUuid);
-//     peerConnections[peerUuid].pc.ontrack = (event) =>
-//         gotRemoteStream(event, peerUuid);
-//     peerConnections[peerUuid].pc.oniceconnectionstatechange = (event) =>
-//         checkPeerDisconnect(event, peerUuid);
-//     peerConnections[peerUuid].pc.addStream(localStream);
-
-//     if (initCall) {
-//         peerConnections[peerUuid].pc
-//             .createOffer()
-//             .then((description) => createdDescription(description, peerUuid))
-//             .catch(errorHandler);
-//     }
-// }
-
-// function createdDescription(description, peerUuid) {
-//     console.log(`Created ${description.type} description, peer ${peerUuid}`);
-//     peerConnections[peerUuid].pc
-//         .setLocalDescription(description)
-//         .then(() => {
-//             serverConnection.send(
-//                 JSON.stringify({
-//                     sdp: peerConnections[peerUuid].pc.localDescription,
-//                     uuid: localUuid,
-//                     dest: peerUuid,
-//                 })
-//             );
-//         })
-//         .catch(errorHandler);
-// }
-
-// function gotIceCandidate(event, peerUuid) {
-//     if (event.candidate != null) {
-//         console.log(`Local ICE candidate: \n${event.candidate.candidate}`);
-
-//         serverConnection.send(
-//             JSON.stringify({
-//                 ice: event.candidate,
-//                 uuid: localUuid,
-//                 dest: peerUuid,
-//             })
-//         );
-//     }
-// }
-
-// function gotRemoteStream(event, peerUuid) {
-//     console.log(`got remote stream, peer ${peerUuid}`);
-//     // Assign stream to a new HTML video element
-//     const vidElement = document.createElement("video");
-//     vidElement.setAttribute("autoplay", "");
-//     vidElement.setAttribute("muted", "");
-//     vidElement.srcObject = event.streams[0];
-
-//     const vidContainer = document.createElement("div");
-//     vidContainer.setAttribute("id", "remoteVideo_" + peerUuid);
-//     vidContainer.setAttribute("class", "videoContainer");
-//     vidContainer.appendChild(vidElement);
-//     vidContainer.appendChild(makeLabel(peerConnections[peerUuid].displayName));
-
-//     document.getElementById("videos").appendChild(vidContainer);
-
-//     updateLayout();
-// }
-
-// function checkPeerDisconnect(event, peerUuid) {
-//     const state = peerConnections[peerUuid].pc.iceConnectionState;
-//     console.log(`connection with peer ${peerUuid} ${state}`);
-//     if (state === "failed" || state === "closed" || state === "disconnected") {
-//         delete peerConnections[peerUuid];
-//         document
-//             .getElementById("videos")
-//             .removeChild(document.getElementById("remoteVideo_" + peerUuid));
-//         updateLayout();
-//     }
-// }
-
-// function updateLayout() {
-//     // Update CSS grid based on the number of displayed videos
-//     let rowHeight = "98vh";
-//     let colWidth = "98vw";
-
-//     let numVideos = Object.keys(peerConnections).length + 1; // Add one to include the local video
-
-//     if (numVideos > 1 && numVideos <= 4) {
-//         // 2x2 grid
-//         rowHeight = "48vh";
-//         colWidth = "48vw";
-//     } else if (numVideos > 4) {
-//         // 3x3 grid
-//         rowHeight = "32vh";
-//         colWidth = "32vw";
-//     }
-
-//     document.documentElement.style.setProperty(`--rowHeight`, rowHeight);
-//     document.documentElement.style.setProperty(`--colWidth`, colWidth);
-// }
-
-// function makeLabel(label) {
-//     const vidLabel = document.createElement("div");
-//     vidLabel.appendChild(document.createTextNode(label));
-//     vidLabel.setAttribute("class", "videoLabel");
-//     return vidLabel;
-// }
-
-// // Clean up peer connections when the user leaves the page
-// window.addEventListener("beforeunload", function () {
-//     for (const peerUuid in peerConnections) {
-//         peerConnections[peerUuid].pc.close();
-//     }
-//     serverConnection.close();
-// });
+        // Set up websocket for signaling and message all existing clients
+        serverConnection = new WebSocket("ws://localhost:8080");
+        serverConnection.onmessage = handleServerMessage;
+        serverConnection.onopen = (event) => {
+            // Send a message to the server with the local display name and UUID
+            sendMessageToServer({
+                displayName: localDisplayName,
+                uuid: localUuid,
+                dest: "all",
+            });
+        };
+    } catch (error) {
+        // Handle getUserMedia permission issues gracefully
+        errorHandler("Error accessing media devices: " + error.message);
+    }
+});
